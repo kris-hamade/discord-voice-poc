@@ -38,10 +38,12 @@ jobs:
         run: |
           docker run -d \
             -e DISCORD_TOKEN=${DISCORD_TOKEN} \
+            -e AUTO_DISCONNECT_SECONDS=${AUTO_DISCONNECT_SECONDS} \
             --name discord-voice-poc \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          AUTO_DISCONNECT_SECONDS: ${{ secrets.AUTO_DISCONNECT_SECONDS }}
 
       # Push the Docker image to GHCR
       - name: Push Docker image to GHCR
