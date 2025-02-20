@@ -22,6 +22,8 @@ const DISCONNECT_AFTER_IDLE = parseInt(process.env.AUTO_DISCONNECT_SECONDS, 10) 
 
 // Store idle timers per guild, in case your bot is in multiple guilds at once
 const idleTimers = new Map();
+// Store loop information per guild (guildId -> loop URL)
+const loops = new Map();
 
 const client = new Client({
   intents: [
@@ -36,7 +38,6 @@ const client = new Client({
 // Slash command definitions
 // ---------------------------------
 const commands = [
-  // Removed the /join command entirely
   {
     name: 'play',
     description: 'Play a YouTube link in the connected voice channel (auto-joins if needed).',
@@ -45,6 +46,18 @@ const commands = [
         name: 'url',
         type: 3, // STRING
         description: 'The YouTube URL to play.',
+        required: true,
+      },
+    ],
+  },
+  {
+    name: 'loop',
+    description: 'Loop a YouTube link continuously until stopped.',
+    options: [
+      {
+        name: 'url',
+        type: 3, // STRING
+        description: 'The YouTube URL to loop.',
         required: true,
       },
     ],
@@ -100,15 +113,47 @@ function startIdleTimer(connection, guildId) {
 }
 
 // ----------------------------------------------------------------------
+// Helper: Setup Idle Listener for a given player & connection
+// ----------------------------------------------------------------------
+function setupIdleListener(player, connection) {
+  // Remove any existing idle listeners to override old behavior
+  player.removeAllListeners(AudioPlayerStatus.Idle);
+  player.on(AudioPlayerStatus.Idle, () => {
+    const guildId = connection.joinConfig.guildId;
+    if (loops.has(guildId)) {
+      const loopUrl = loops.get(guildId);
+      console.log(`Looping track: ${loopUrl}`);
+      try {
+        const stream = ytdl(loopUrl, { filter: 'audioonly' });
+        const resource = createAudioResource(stream);
+        player.play(resource);
+      } catch (err) {
+        console.error('Error replaying loop track:', err);
+        // In case of error, clear loop and start idle disconnect
+        loops.delete(guildId);
+        startIdleTimer(connection, guildId);
+      }
+    } else {
+      console.log('AudioPlayerStatus: Idle (no loop set)');
+      startIdleTimer(connection, guildId);
+    }
+  });
+}
+
+// ----------------------------------------------------------------------
 // Main command handling
 // ----------------------------------------------------------------------
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+  const guildId = interaction.guildId;
 
   // --------------------------- PLAY COMMAND ---------------------------
   if (interaction.commandName === 'play') {
     const url = interaction.options.getString('url');
     console.log('Received play command with URL:', url);
+
+    // Clear any existing loop if playing a new track
+    loops.delete(guildId);
 
     const member = interaction.member;
     const voiceChannel = member.voice.channel;
@@ -128,42 +173,30 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     // Check if already connected; if not, join now
-    let connection = getVoiceConnection(interaction.guildId);
+    let connection = getVoiceConnection(guildId);
     if (!connection) {
-      // Join the user's voice channel
       connection = joinVoiceChannel({
         channelId: voiceChannel.id,
-        guildId: interaction.guild.id,
+        guildId: guildId,
         adapterCreator: interaction.guild.voiceAdapterCreator,
         selfDeaf: false,
       });
     }
 
     try {
-      // Create ytdl stream
       const stream = ytdl(url, { filter: 'audioonly' });
-      // Create resource
       const resource = createAudioResource(stream);
 
-      // Use existing audio player or create a new one
       let player = connection.state.subscription?.player;
       if (!player) {
         player = createAudioPlayer();
         connection.subscribe(player);
 
-        // Set up status listeners (only do this once per guild/player)
         player.on(AudioPlayerStatus.Playing, () => {
           console.log('AudioPlayerStatus: Playing');
-          // If we start playing, cancel any idle-disconnect timer
-          clearIdleTimer(interaction.guildId);
+          clearIdleTimer(guildId);
         });
-
-        player.on(AudioPlayerStatus.Idle, () => {
-          console.log('AudioPlayerStatus: Idle (finished or no more data)');
-          // Start idle timer to disconnect automatically
-          startIdleTimer(connection, interaction.guildId);
-        });
-
+        setupIdleListener(player, connection);
         player.on(AudioPlayerStatus.Buffering, () => {
           console.log('AudioPlayerStatus: Buffering');
         });
@@ -173,9 +206,11 @@ client.on('interactionCreate', async (interaction) => {
         player.on('error', (err) => {
           console.error('Audio player error:', err);
         });
+      } else {
+        // Update idle listener in case it was previously set for looping
+        setupIdleListener(player, connection);
       }
 
-      // Start playback
       player.play(resource);
 
       await interaction.reply(`Now playing: ${url}`);
@@ -185,9 +220,84 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
+  // --------------------------- LOOP COMMAND ---------------------------
+  if (interaction.commandName === 'loop') {
+    const url = interaction.options.getString('url');
+    console.log('Received loop command with URL:', url);
+
+    const member = interaction.member;
+    const voiceChannel = member.voice.channel;
+    if (!voiceChannel) {
+      return interaction.reply({
+        content: 'You need to be in a voice channel to use this command.',
+        ephemeral: true,
+      });
+    }
+
+    // Validate link
+    if (!ytdl.validateURL(url)) {
+      return interaction.reply({
+        content: 'Please provide a valid YouTube link.',
+        ephemeral: true,
+      });
+    }
+
+    // Join voice channel if not connected
+    let connection = getVoiceConnection(guildId);
+    if (!connection) {
+      connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: guildId,
+        adapterCreator: interaction.guild.voiceAdapterCreator,
+        selfDeaf: false,
+      });
+    }
+
+    // Clear any idle timer
+    clearIdleTimer(guildId);
+
+    try {
+      let player = connection.state.subscription?.player;
+      if (!player) {
+        player = createAudioPlayer();
+        connection.subscribe(player);
+
+        player.on(AudioPlayerStatus.Playing, () => {
+          console.log('AudioPlayerStatus: Playing');
+          clearIdleTimer(guildId);
+        });
+        setupIdleListener(player, connection);
+        player.on(AudioPlayerStatus.Buffering, () => {
+          console.log('AudioPlayerStatus: Buffering');
+        });
+        player.on(AudioPlayerStatus.Paused, () => {
+          console.log('AudioPlayerStatus: Paused');
+        });
+        player.on('error', (err) => {
+          console.error('Audio player error:', err);
+        });
+      } else {
+        // Update idle listener to ensure loop behavior is in place
+        setupIdleListener(player, connection);
+      }
+
+      // Set the loop flag for this guild
+      loops.set(guildId, url);
+
+      const stream = ytdl(url, { filter: 'audioonly' });
+      const resource = createAudioResource(stream);
+      player.play(resource);
+
+      await interaction.reply(`Now looping: ${url}`);
+    } catch (error) {
+      console.error('Error looping track:', error);
+      await interaction.reply('Failed to loop the track. Please try again.');
+    }
+  }
+
   // --------------------------- STOP COMMAND ---------------------------
   if (interaction.commandName === 'stop') {
-    const connection = getVoiceConnection(interaction.guildId);
+    const connection = getVoiceConnection(guildId);
 
     if (!connection) {
       return interaction.reply({
@@ -205,10 +315,12 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     try {
+      // Clear loop flag if set
+      loops.delete(guildId);
       player.stop(true); // Force stop
       await interaction.reply('Playback has been **stopped**.');
       // Bot remains in voice; now it's idle, so we start the idle timer
-      startIdleTimer(connection, interaction.guildId);
+      startIdleTimer(connection, guildId);
     } catch (error) {
       console.error('Error stopping playback:', error);
       await interaction.reply('Failed to stop playback. Check console logs.');
@@ -217,7 +329,7 @@ client.on('interactionCreate', async (interaction) => {
 
   // --------------------------- DISCONNECT COMMAND ---------------------------
   if (interaction.commandName === 'disconnect') {
-    const connection = getVoiceConnection(interaction.guildId);
+    const connection = getVoiceConnection(guildId);
 
     if (!connection) {
       return interaction.reply({
@@ -227,8 +339,8 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     try {
-      // Clear any idle timer
-      clearIdleTimer(interaction.guildId);
+      clearIdleTimer(guildId);
+      loops.delete(guildId);
       connection.destroy();
       await interaction.reply('Disconnected from the voice channel.');
     } catch (error) {
@@ -249,11 +361,11 @@ client.on('interactionCreate', async (interaction) => {
       });
     }
 
-    let connection = getVoiceConnection(interaction.guildId);
+    let connection = getVoiceConnection(guildId);
     if (!connection) {
       connection = joinVoiceChannel({
         channelId: voiceChannel.id,
-        guildId: interaction.guild.id,
+        guildId: guildId,
         adapterCreator: interaction.guild.voiceAdapterCreator,
         selfDeaf: false,
       });
@@ -267,12 +379,9 @@ client.on('interactionCreate', async (interaction) => {
 
         player.on(AudioPlayerStatus.Playing, () => {
           console.log('AudioPlayerStatus: Playing (local file)');
-          clearIdleTimer(interaction.guildId);
+          clearIdleTimer(guildId);
         });
-        player.on(AudioPlayerStatus.Idle, () => {
-          console.log('AudioPlayerStatus: Idle (local file finished)');
-          startIdleTimer(connection, interaction.guildId);
-        });
+        setupIdleListener(player, connection);
         player.on(AudioPlayerStatus.Buffering, () => {
           console.log('AudioPlayerStatus: Buffering (local file)');
         });
@@ -282,6 +391,8 @@ client.on('interactionCreate', async (interaction) => {
         player.on('error', (err) => {
           console.error('Audio player error (local file):', err);
         });
+      } else {
+        setupIdleListener(player, connection);
       }
 
       const audioPath = path.join(__dirname, 'test.mp3');

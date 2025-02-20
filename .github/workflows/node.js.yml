@@ -1,4 +1,6 @@
-name: Docker Image CI
+# This workflow will install dependencies, cache them, and run the server for the school-closing project
+
+name: School Closing CI
 
 on:
   push:
@@ -8,11 +10,19 @@ on:
 
 jobs:
   build:
-    environment: Production
     runs-on: ubuntu-latest
+    environment: Production
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Use Node.js 18.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18.x
+          cache: "npm"
+
+      - run: npm ci
 
       - name: Build the Docker image
         run: docker build . --file Dockerfile --tag clamor-bot:latest
