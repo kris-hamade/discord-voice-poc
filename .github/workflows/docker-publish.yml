@@ -32,14 +32,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build the Docker image
-        run: docker build . --file Dockerfile --tag clamor-bot:latest
+        run: docker build . --file Dockerfile --tag discord-voice-poc:latest
 
       - name: Run the Docker container
         run: |
           docker run -d \
             -e DISCORD_TOKEN=${DISCORD_TOKEN} \
-            --name clamor-bot \
-            clamor-bot:latest
+            --name discord-voice-poc \
+            discord-voice-poc:latest
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
 
