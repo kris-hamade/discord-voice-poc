@@ -32,14 +32,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build the Docker image
-        run: docker build . --file Dockerfile --tag discord-voice-poc:latest
+        run: docker build . --file Dockerfile --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
       - name: Run the Docker container
         run: |
           docker run -d \
             -e DISCORD_TOKEN=${DISCORD_TOKEN} \
             --name discord-voice-poc \
-            discord-voice-poc:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
 
